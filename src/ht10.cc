@@ -4,9 +4,11 @@
 
 #include "rc/ht10.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "bsp/time.h"
+#include "bsp/sys.h"
 
 using namespace rc::ht10;
 
@@ -18,7 +20,14 @@ const data_t* rc::ht10::data() {
     return &data_;
 }
 
-static struct {
+data_t rc::ht10::state() {
+    const unsigned long state = bsp_sys_enter_critical();
+    const data_t copy = data_;
+    bsp_sys_exit_critical(state);
+    return copy;
+}
+
+typedef struct {
     uint8_t head;
 
     uint16_t r_x : 11;          // CH1 右摇杆 左右
@@ -42,24 +51,56 @@ static struct {
     uint16_t ch16 : 11;
 
     uint8_t status, end;
-} __attribute__((packed)) raw;
+} __attribute__((packed)) ht10_raw_t;
+static uint8_t rx_stream[sizeof(ht10_raw_t) * 2];
+static size_t rx_size;
 
 static void callback(bsp_uart_e device, const uint8_t *data, size_t size) {
-    static_assert(sizeof(raw) * 8 == 11 * 16 + 8 * 3);
-    memcpy(&raw, data, sizeof raw);
-    if (raw.head != 0x0f or raw.end != 0x00) return;
+    static_assert(sizeof(ht10_raw_t) * 8 == 11 * 16 + 8 * 3);
+    if (data == nullptr || size == 0) return;
+    if (size > sizeof(rx_stream)) {
+        data += size - sizeof(rx_stream);
+        size = sizeof(rx_stream);
+        rx_size = 0;
+    } else if (size > sizeof(rx_stream) - rx_size) {
+        const size_t keep = std::min(rx_size, sizeof(rx_stream) - size);
+        memmove(rx_stream, rx_stream + rx_size - keep, keep);
+        rx_size = keep;
+    }
+    memcpy(rx_stream + rx_size, data, size);
+    rx_size += size;
 
-    data_.rc_l[0] = static_cast <int16_t> (raw.l_x - 992), data_.rc_l[1] = static_cast <int16_t> (raw.l_y - 992);
-    data_.rc_r[0] = static_cast <int16_t> (raw.r_x - 992), data_.rc_r[1] = static_cast <int16_t> (raw.r_y - 992);
-    data_.swa = static_cast <int8_t> (raw.swa == 992 ? 0 : raw.swa == 192 ? 1 : -1);
-    data_.swb = static_cast <int8_t> (raw.swb == 992 ? 0 : raw.swb == 192 ? 1 : -1);
-    data_.swc = static_cast <int8_t> (raw.swc == 992 ? 0 : raw.swc == 192 ? 1 : -1);
-    data_.swd = static_cast <int8_t> (raw.swd == 992 ? 0 : raw.swd == 192 ? 1 : -1);
-    data_.vra = static_cast <int16_t> (raw.vra - 992);
-    data_.vrb = static_cast <int16_t> (raw.vrb - 992);
+    size_t offset = 0;
+    while (offset + sizeof(ht10_raw_t) <= rx_size) {
+        ht10_raw_t raw;
+        memcpy(&raw, rx_stream + offset, sizeof raw);
+        if (raw.head != 0x0f || raw.end != 0x00) {
+            offset++;
+            continue;
+        }
 
-    data_.status = raw.status;
-    data_.timestamp = bsp_time_get_ms();
+        data_t next = {};
+        next.rc_l[0] = static_cast <int16_t> (raw.l_x - 992), next.rc_l[1] = static_cast <int16_t> (raw.l_y - 992);
+        next.rc_r[0] = static_cast <int16_t> (raw.r_x - 992), next.rc_r[1] = static_cast <int16_t> (raw.r_y - 992);
+        next.swa = static_cast <int8_t> (raw.swa == 992 ? 0 : raw.swa == 192 ? 1 : -1);
+        next.swb = static_cast <int8_t> (raw.swb == 992 ? 0 : raw.swb == 192 ? 1 : -1);
+        next.swc = static_cast <int8_t> (raw.swc == 992 ? 0 : raw.swc == 192 ? 1 : -1);
+        next.swd = static_cast <int8_t> (raw.swd == 992 ? 0 : raw.swd == 192 ? 1 : -1);
+        next.vra = static_cast <int16_t> (raw.vra - 992);
+        next.vrb = static_cast <int16_t> (raw.vrb - 992);
+        next.status = raw.status;
+        next.timestamp = bsp_time_get_ms();
+
+        const unsigned long state = bsp_sys_enter_critical();
+        data_ = next;
+        bsp_sys_exit_critical(state);
+        offset += sizeof(ht10_raw_t);
+    }
+
+    if (offset > 0) {
+        memmove(rx_stream, rx_stream + offset, rx_size - offset);
+        rx_size -= offset;
+    }
 }
 
 void rc::ht10::init(bsp_uart_e port) {

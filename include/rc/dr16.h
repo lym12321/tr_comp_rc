@@ -25,5 +25,6 @@ namespace rc::dr16 {
     } data_t;
 
     const data_t *data();
+    data_t state();
     void init(bsp_uart_e port);
 }
